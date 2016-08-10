@@ -53,7 +53,7 @@ class RemoteWorkQueueClient {
         priority = this.defaultPriority,
         unique = false
     } = {}) {
-        return new Promise(function(resolve, reject) {
+        return new Promise(_.bind(function(resolve, reject) {
             let newJob = {
                 priority,
                 requested: moment().valueOf(),
@@ -90,7 +90,7 @@ class RemoteWorkQueueClient {
             }
 
             this.dispatchJobs();
-        });
+        }, this));
     }
 
     *
