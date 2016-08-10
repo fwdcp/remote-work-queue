@@ -3,6 +3,7 @@
 const _ = require('lodash');
 const amqp = require('amqplib');
 const asyncClass = require('async-class');
+const crypto = require('crypto');
 const moment = require('moment');
 
 const helpers = require('./helpers');
@@ -46,12 +47,15 @@ class RemoteWorkQueueClient {
 
     queueJob(tasks, {
         maxRuntime = null,
-        maxWait = null
+        maxWait = null,
+        unique = false
     } = {}) {
         return new Promise(function(resolve, reject) {
             let newJob = {
                 requested: moment().valueOf(),
-                tasks: _.uniqWith(tasks, _.isEqual),
+                tasks: unique ? _.map(tasks, task => _.defaults({
+                    _remoteWorkQueueId: crypto.randomBytes(8).toString()
+                }, task)) : _.uniqWith(tasks, _.isEqual),
                 completed: _.fill([], false, 0, _.size(tasks)),
                 results: _.fill([], null, 0, _.size(tasks)),
                 maxRuntime,
