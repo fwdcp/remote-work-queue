@@ -69,6 +69,19 @@ describe('remote work queue', function() {
         }])).to.be.rejectedWith('hello world');
     }));
 
+    it('should run multiple tasks in a job', co.wrap(function*() {
+        expect(basicClient.queueJob([{
+            type: 'basicWait',
+            timeout: 1000
+        }, {
+            type: 'basicWait',
+            timeout: 2000
+        }, {
+            type: 'basicWait',
+            timeout: 3000
+        }])).to.eventually.deep.equal([1, 2, 3]);
+    }));
+
     it('should apply results across non-unique jobs', co.wrap(function*() {
         expect(basicClient.queueJob([{
             type: 'basicWait',
@@ -165,6 +178,15 @@ describe('remote work queue', function() {
         }], {
             priority: 100
         })).to.eventually.be.most(2);
+    }));
+
+    it('should time out if runtime is too long', co.wrap(function*() {
+        expect(basicClient.queueJob([{
+            type: 'basicWait',
+            timeout: 8000
+        }], {
+            maxRuntime: 4000
+        })).to.be.rejectedWith('task timed out');
     }));
 
     afterEach(co.wrap(function*() {
