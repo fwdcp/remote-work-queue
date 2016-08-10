@@ -2,7 +2,7 @@
   "name": "remote-work-queue",
   "version": "0.0.0",
   "description": "a Node.js work queue distributing tasks via RabbitMQ",
-  "main": "manager.js",
+  "main": "client.js",
   "scripts": {
     "test": "mocha --reporter spec"
   },
@@ -15,5 +15,12 @@
   "bugs": {
     "url": "https://github.com/fwdcp/remote-work-queue/issues"
   },
-  "homepage": "https://github.com/fwdcp/remote-work-queue#readme"
+  "homepage": "https://github.com/fwdcp/remote-work-queue#readme",
+  "dependencies": {
+    "amqplib": "^0.4.2",
+    "async-class": "^0.4.1",
+    "co": "^4.6.0",
+    "lodash": "^4.14.2",
+    "moment": "^2.14.1"
+  }
 }
