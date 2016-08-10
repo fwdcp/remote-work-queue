@@ -72,24 +72,50 @@ describe('remote work queue', function() {
     it('should apply results across non-unique jobs', co.wrap(function*() {
         expect(basicClient.queueJob([{
             type: 'basicWait',
-            timeout: 4000
+            timeout: 4000,
+            returnOrder: true
         }])).to.be.fulfilled;
         expect(basicClient.queueJob([{
             type: 'basicWait',
-            timeout: 4000
-        }])).to.be.fulfilled;
+            timeout: 4000,
+            returnOrder: true
+        }])).to.eventually.be.most(2);
         expect(basicClient.queueJob([{
             type: 'basicWait',
-            timeout: 4000
-        }])).to.be.fulfilled;
+            timeout: 4000,
+            returnOrder: true
+        }])).to.eventually.be.most(2);
         expect(basicClient.queueJob([{
             type: 'basicWait',
-            timeout: 4000
-        }])).to.be.fulfilled;
+            timeout: 4000,
+            returnOrder: true
+        }])).to.eventually.be.most(2);
         expect(basicClient.queueJob([{
             type: 'basicWait',
-            timeout: 4000
-        }])).to.be.fulfilled;
+            timeout: 4000,
+            returnOrder: true
+        }])).to.eventually.be.most(2);
+    }));
+
+    it('should not apply results across unique jobs', co.wrap(function*() {
+        expect(basicClient.queueJob([{
+            type: 'basicWait',
+            returnOrder: true
+        }], {
+            unique: true
+        })).to.eventually.equal(1);
+        expect(basicClient.queueJob([{
+            type: 'basicWait',
+            returnOrder: true
+        }], {
+            unique: true
+        })).to.eventually.equal(2);
+        expect(basicClient.queueJob([{
+            type: 'basicWait',
+            returnOrder: true
+        }], {
+            unique: true
+        })).to.eventually.equal(3);
     }));
 
     it('should run jobs concurrently', co.wrap(function*() {
@@ -126,19 +152,19 @@ describe('remote work queue', function() {
             returnOrder: true
         }], {
             priority: 20
-        })).to.eventually.equal(4);
+        })).to.eventually.be.most(4);
         expect(basicClient.queueJob([{
             type: 'basicWait',
             returnOrder: true
         }], {
             priority: 50
-        })).to.eventually.equal(3);
+        })).to.eventually.be.most(3);
         expect(basicClient.queueJob([{
             type: 'basicWait',
             returnOrder: true
         }], {
             priority: 100
-        })).to.eventually.equal(2);
+        })).to.eventually.be.most(2);
     }));
 
     afterEach(co.wrap(function*() {
