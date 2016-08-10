@@ -1,0 +1,19 @@
+{
+  "name": "remote-work-queue",
+  "version": "0.0.0",
+  "description": "a Node.js work queue distributing tasks via RabbitMQ",
+  "main": "manager.js",
+  "scripts": {
+    "test": "mocha --reporter spec"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fwdcp/remote-work-queue.git"
+  },
+  "author": "Forward Command Post (http://fwdcp.net)",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/fwdcp/remote-work-queue/issues"
+  },
+  "homepage": "https://github.com/fwdcp/remote-work-queue#readme"
+}
