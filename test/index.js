@@ -15,12 +15,17 @@ const TestFunctions = asyncClass.wrap(class {
     }
 
     basicWait({
-        timeout = 1000,
+        timeout = 2000,
         value = 'hello world',
-        success = true
+        success = true,
+        returnOrder = false
     } = {}) {
         return new Promise(_.bind(function(resolve, reject) {
             this.called++;
+
+            if (returnOrder) {
+                value = this.called;
+            }
 
             setTimeout(function() {
                 if (success) {
@@ -52,12 +57,9 @@ describe('remote work queue', function() {
     }));
 
     it('should process basic tasks', co.wrap(function*() {
-        let results = yield basicClient.queueJob([{
+        expect(basicClient.queueJob([{
             type: 'basicWait'
-        }]);
-
-        expect(results).to.have.length(1);
-        expect(results[0]).to.equal('hello world');
+        }])).to.be.fulfilled;
     }));
 
     it('should report failures properly', co.wrap(function*() {
@@ -67,27 +69,76 @@ describe('remote work queue', function() {
         }])).to.be.rejectedWith('hello world');
     }));
 
-    it('should apply results to non-unique jobs', co.wrap(function*() {
+    it('should apply results across non-unique jobs', co.wrap(function*() {
         expect(basicClient.queueJob([{
             type: 'basicWait',
-            timeout: 2000
+            timeout: 4000
         }])).to.be.fulfilled;
         expect(basicClient.queueJob([{
             type: 'basicWait',
-            timeout: 2000
+            timeout: 4000
         }])).to.be.fulfilled;
         expect(basicClient.queueJob([{
             type: 'basicWait',
-            timeout: 2000
+            timeout: 4000
         }])).to.be.fulfilled;
         expect(basicClient.queueJob([{
             type: 'basicWait',
-            timeout: 2000
+            timeout: 4000
         }])).to.be.fulfilled;
         expect(basicClient.queueJob([{
             type: 'basicWait',
-            timeout: 2000
+            timeout: 4000
         }])).to.be.fulfilled;
+    }));
+
+    it('should run jobs concurrently', co.wrap(function*() {
+        let superClient = new Client({
+            concurrentJobs: 3
+        });
+        yield superClient.initialize();
+
+        let superWorker = new Worker(testFunctions, {
+            concurrentTasks: 3
+        });
+        yield superWorker.initialize();
+
+        expect(superClient.queueJob([{
+            type: 'basicWait',
+            timeout: 3000
+        }])).to.be.fulfilled;
+        expect(superClient.queueJob([{
+            type: 'basicWait',
+            timeout: 4000
+        }])).to.be.fulfilled;
+        expect(superClient.queueJob([{
+            type: 'basicWait',
+            timeout: 5000
+        }])).to.be.fulfilled;
+    }));
+
+    it('should run higher-priority jobs first', co.wrap(function*() {
+        expect(basicClient.queueJob([{
+            type: 'basicWait'
+        }])).to.be.fulfilled;
+        expect(basicClient.queueJob([{
+            type: 'basicWait',
+            returnOrder: true
+        }], {
+            priority: 20
+        })).to.eventually.equal(4);
+        expect(basicClient.queueJob([{
+            type: 'basicWait',
+            returnOrder: true
+        }], {
+            priority: 50
+        })).to.eventually.equal(3);
+        expect(basicClient.queueJob([{
+            type: 'basicWait',
+            returnOrder: true
+        }], {
+            priority: 100
+        })).to.eventually.equal(2);
     }));
 
     afterEach(co.wrap(function*() {
