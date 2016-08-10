@@ -42,12 +42,12 @@ class RemoteWorkQueueWorker {
 
             yield this.channel.assertExchange(this.connectionOptions.resultExchange, 'fanout');
 
-            let consumeResponse = yield this.channel.consume(this.connectionOptions.commandQueue, this.processTask.bind(this));
-            this.consumerTag = consumeResponse.consumerTag;
-
             this.active = true;
             this.closing = false;
             this.reportCloseComplete = _.noop;
+
+            let consumeResponse = yield this.channel.consume(this.connectionOptions.commandQueue, this.processTask.bind(this));
+            this.consumerTag = consumeResponse.consumerTag;
         }
     }
 
@@ -68,9 +68,11 @@ class RemoteWorkQueueWorker {
 
             yield this.channel.cancel(this.consumerTag);
 
-            yield new Promise(_.bind(function(resolve) {
-                this.reportCloseComplete = resolve;
-            }, this));
+            if (this.currentTasks !== 0) {
+                yield new Promise(_.bind(function(resolve) {
+                    this.reportCloseComplete = resolve;
+                }, this));
+            }
 
             yield this.channel.close();
             yield this.connection.close();
@@ -89,11 +91,11 @@ class RemoteWorkQueueWorker {
 
         this.currentTasks++;
 
-        let task = helpers.convertBufferToJSON(msg.contents);
+        let task = helpers.convertBufferToJSON(msg.content);
 
         yield this.runTask(task);
 
-        yield this.channel.ack(msg);
+        this.channel.ack(msg);
 
         this.currentTasks--;
 
@@ -112,7 +114,7 @@ class RemoteWorkQueueWorker {
         };
 
         try {
-            if (!_.has(this.taskFunctions, task.type)) {
+            if (!_.hasIn(this.taskFunctions, task.type)) {
                 throw new Error('unknown task type given');
             }
 
@@ -127,7 +129,7 @@ class RemoteWorkQueueWorker {
         }
 
         if (this.active) {
-            yield this.channel.publish(this.connectionOptions.resultExchange, '', helpers.convertJSONToBuffer(response));
+            this.channel.publish(this.connectionOptions.resultExchange, '', helpers.convertJSONToBuffer(response));
         }
     }
 }

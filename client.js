@@ -84,6 +84,8 @@ class RemoteWorkQueueClient {
 
             yield new Promise(_.bind(function(resolve) {
                 this.reportCloseComplete = resolve;
+
+                this.maintainJobs();
             }, this));
 
             yield this.channel.close();
@@ -112,14 +114,16 @@ class RemoteWorkQueueClient {
                 return;
             }
 
+            let jobTasks = unique ? _.map(tasks, task => _.defaults({
+                _remoteWorkQueueId: crypto.randomBytes(8).toString()
+            }, task)) : _(tasks).map(_.clone).uniqWith(_.isEqual).value();
+
             let newJob = {
                 priority,
                 requested: moment().valueOf(),
-                tasks: unique ? _.map(tasks, task => _.defaults({
-                    _remoteWorkQueueId: crypto.randomBytes(8).toString()
-                }, task)) : _.uniqWith(tasks, _.isEqual),
-                completed: _.fill([], false, 0, _.size(tasks)),
-                results: _.fill([], null, 0, _.size(tasks)),
+                tasks: jobTasks,
+                completed: _.fill(new Array(_.size(jobTasks)), false),
+                results: _.fill(new Array(_.size(jobTasks)), null),
                 failed: false,
                 failure: null,
                 maxRuntime,
@@ -150,18 +154,22 @@ class RemoteWorkQueueClient {
 
     *
     dispatchJobs() {
+        let jobsFailed = false;
+
         while (_.size(this.currentJobs) < this.concurrentJobs && _.size(this.queue) > 0) {
             let nextJob = this.queue.shift();
             this.currentJobs.push(nextJob);
 
             try {
                 for (let task of nextJob.tasks) {
-                    yield this.channel.sendToQueue(this.connectionOptions.commandQueue, helpers.convertJSONToBuffer(task), {
+                    this.channel.sendToQueue(this.connectionOptions.commandQueue, helpers.convertJSONToBuffer(task), {
                         persistent: true
                     });
                 }
             }
             catch (err) {
+                jobsFailed = true;
+
                 nextJob.failed = true;
                 nextJob.failure = err;
             }
@@ -178,7 +186,9 @@ class RemoteWorkQueueClient {
             }
         }
 
-        this.maintainJobs();
+        if (jobsFailed) {
+            this.maintainJobs();
+        }
     }
 
     maintainJobs() {
@@ -223,11 +233,11 @@ class RemoteWorkQueueClient {
     *
     processResponse(msg) {
         if (!this.active) {
-            yield this.channel.ack(msg);
+            this.channel.ack(msg);
             return;
         }
 
-        let response = helpers.convertBufferToJSON(msg.contents);
+        let response = helpers.convertBufferToJSON(msg.content);
 
         function applyTaskResultToJob(job, {
             ignoreFailure = false
@@ -257,7 +267,7 @@ class RemoteWorkQueueClient {
             ignoreFailure: true
         }));
 
-        yield this.channel.ack(msg);
+        this.channel.ack(msg);
 
         this.maintainJobs();
     }
