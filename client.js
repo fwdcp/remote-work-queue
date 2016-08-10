@@ -13,7 +13,8 @@ class RemoteWorkQueueClient {
         connect = 'amqp://localhost',
         commandQueue = 'remote-work-commands',
         resultExchange = 'remote-work-results',
-        concurrentJobs = 1
+        concurrentJobs = 1,
+        defaultPriority = 10
     } = {}) {
         this.connectionOptions = {
             connect,
@@ -21,6 +22,7 @@ class RemoteWorkQueueClient {
             resultExchange
         };
         this.concurrentJobs = concurrentJobs;
+        this.defaultPriority = defaultPriority;
 
         this.channel = null;
         this.queue = [];
@@ -48,10 +50,12 @@ class RemoteWorkQueueClient {
     queueJob(tasks, {
         maxRuntime = null,
         maxWait = null,
+        priority = this.defaultPriority,
         unique = false
     } = {}) {
         return new Promise(function(resolve, reject) {
             let newJob = {
+                priority,
                 requested: moment().valueOf(),
                 tasks: unique ? _.map(tasks, task => _.defaults({
                     _remoteWorkQueueId: crypto.randomBytes(8).toString()
@@ -66,7 +70,8 @@ class RemoteWorkQueueClient {
                 reportFailure: reject
             };
 
-            this.queue.push(newJob);
+            let queueIndex = _.findLastIndex(this.queue, job => (job.priority >= newJob.priority)) + 1;
+            this.queue.splice(queueIndex, 0, newJob);
 
             if (newJob.maxWait) {
                 setTimeout(_.bind(function() {
