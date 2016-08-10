@@ -64,7 +64,7 @@ class RemoteWorkQueueClient {
             job.failure = new Error('remote work queue is shutting down');
         }
 
-        if (!this.active) {
+        if (!this.active || this.closing) {
             return;
         }
 
