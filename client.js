@@ -123,6 +123,7 @@ class RemoteWorkQueueClient {
         }
     }
 
+    *
     processResponse(msg) {
         let response = helpers.convertBufferToJSON(msg.contents);
 
@@ -185,6 +186,8 @@ class RemoteWorkQueueClient {
         this.queue = _.reject(this.queue, _.partial(applyTaskResultToJob, _, {
             ignoreFailure: true
         }));
+
+        yield this.channel.ack(msg);
 
         this.dispatchJobs();
     }
