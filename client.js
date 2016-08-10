@@ -60,17 +60,8 @@ class RemoteWorkQueueClient {
     *
     close(immediate = false) {
         function terminateJob(job) {
-            if (job.runtimeTimeout) {
-                clearTimeout(job.runtimeTimeout);
-                job.runtimeTimeout = null;
-            }
-
-            if (job.waitTimeout) {
-                clearTimeout(job.waitTimeout);
-                job.waitTimeout = null;
-            }
-
-            job.reportFailure(new Error('remote work queue is shutting down'));
+            job.failed = true;
+            job.failure = new Error('remote work queue is shutting down');
         }
 
         if (!this.active) {
@@ -81,10 +72,9 @@ class RemoteWorkQueueClient {
             this.active = false;
 
             _.forEach(this.queue, terminateJob);
-            this.queue = [];
-
             _.forEach(this.currentJobs, terminateJob);
-            this.currentJobs = [];
+
+            this.maintainJobs();
 
             yield this.channel.close();
             yield this.connection.close();
@@ -130,6 +120,8 @@ class RemoteWorkQueueClient {
                 }, task)) : _.uniqWith(tasks, _.isEqual),
                 completed: _.fill([], false, 0, _.size(tasks)),
                 results: _.fill([], null, 0, _.size(tasks)),
+                failed: false,
+                failure: null,
                 maxRuntime,
                 maxWait,
                 runtimeTimeout: null,
@@ -142,19 +134,14 @@ class RemoteWorkQueueClient {
             this.queue.splice(queueIndex, 0, newJob);
 
             if (newJob.maxWait) {
-                setTimeout(_.bind(function() {
-                    this.reportFailure(new Error('task waited too long'));
-
-                    if (this.runtimeTimeout) {
-                        clearTimeout(this.runtimeTimeout);
-                        this.runtimeTimeout = null;
+                newJob.waitTimeout = setTimeout(_.bind(function(job) {
+                    if (!job.failed) {
+                        job.failed = true;
+                        job.failure = new Error('task waited too long');
                     }
 
-                    if (this.waitTimeout) {
-                        clearTimeout(this.waitTimeout);
-                        this.runtimeTimeout = null;
-                    }
-                }, newJob), newJob.maxWait);
+                    this.maintainJobs();
+                }, this, newJob), newJob.maxWait);
             }
 
             this.dispatchJobs();
@@ -167,26 +154,68 @@ class RemoteWorkQueueClient {
             let nextJob = this.queue.shift();
             this.currentJobs.push(nextJob);
 
-            for (let task of nextJob.tasks) {
-                yield this.channel.sendToQueue(this.connectionOptions.commandQueue, helpers.convertJSONToBuffer(task), {
-                    persistent: true
-                });
+            try {
+                for (let task of nextJob.tasks) {
+                    yield this.channel.sendToQueue(this.connectionOptions.commandQueue, helpers.convertJSONToBuffer(task), {
+                        persistent: true
+                    });
+                }
+            }
+            catch (err) {
+                nextJob.failed = true;
+                nextJob.failure = err;
             }
 
             if (nextJob.maxRuntime) {
-                setTimeout(_.bind(function() {
-                    this.reportFailure(new Error('task timed out'));
-
-                    if (this.runtimeTimeout) {
-                        clearTimeout(this.runtimeTimeout);
-                        this.runtimeTimeout = null;
+                nextJob.runtimeTimeout = setTimeout(_.bind(function(job) {
+                    if (!job.failed) {
+                        job.failed = true;
+                        job.failure = new Error('task timed out');
                     }
 
-                    if (this.waitTimeout) {
-                        clearTimeout(this.waitTimeout);
-                        this.waitTimeout = null;
-                    }
-                }, nextJob), nextJob.maxRuntime);
+                    this.maintainJobs();
+                }, this, nextJob), nextJob.maxRuntime);
+            }
+        }
+
+        this.maintainJobs();
+    }
+
+    maintainJobs() {
+        function checkIfJobComplete(job) {
+            if (job.failed || !_.includes(job.completed, false)) {
+                if (job.runtimeTimeout) {
+                    clearTimeout(job.runtimeTimeout);
+                    job.runtimeTimeout = null;
+                }
+
+                if (job.waitTimeout) {
+                    clearTimeout(job.waitTimeout);
+                    job.waitTimeout = null;
+                }
+
+                if (!_.includes(job.completed, false)) {
+                    job.reportSuccess(job.results);
+                }
+
+                if (job.failed) {
+                    job.reportFailure(job.failure);
+                }
+
+                return true;
+            }
+
+            return false;
+        }
+
+        this.currentJobs = _.reject(this.currentJobs, checkIfJobComplete);
+        this.queue = _.reject(this.queue, checkIfJobComplete);
+
+        this.dispatchJobs();
+
+        if (this.closing) {
+            if (_.size(this.currentJobs) === 0 && _.size(this.queue) === 0) {
+                this.reportCloseComplete();
             }
         }
     }
@@ -203,10 +232,6 @@ class RemoteWorkQueueClient {
         function applyTaskResultToJob(job, {
             ignoreFailure = false
         } = {}) {
-            let jobFinished = false;
-            let jobSuccessful;
-            let jobReturn;
-
             if (response.start > job.requested) {
                 let taskIndex = _.findIndex(job.tasks, task => _.isEqual(task, response.task));
 
@@ -214,61 +239,27 @@ class RemoteWorkQueueClient {
                     if (response.success) {
                         job.completed[taskIndex] = true;
                         job.results[taskIndex] = response.result;
-
-                        if (!_.includes(job.completed, false)) {
-                            jobFinished = true;
-                            jobSuccessful = true;
-                            jobReturn = job.results;
-                        }
                     }
                     else if (!ignoreFailure) {
-                        if (!job.completed[taskIndex]) {
-                            jobFinished = true;
-                            jobSuccessful = false;
-                            jobReturn = new Error(response.error);
+                        if (!job.failed) {
+                            job.failed = true;
+                            job.failure = new Error(response.error);
                         }
                     }
                 }
             }
-
-            if (jobFinished) {
-                if (job.runtimeTimeout) {
-                    clearTimeout(job.runtimeTimeout);
-                    job.runtimeTimeout = null;
-                }
-
-                if (job.waitTimeout) {
-                    clearTimeout(job.waitTimeout);
-                    job.waitTimeout = null;
-                }
-
-                if (jobSuccessful) {
-                    job.reportSuccess(jobReturn);
-                }
-                else {
-                    job.reportFailure(jobReturn);
-                }
-            }
-
-            return jobFinished;
         }
 
-        this.currentJobs = _.reject(this.currentJobs, applyTaskResultToJob);
+        _.forEach(this.currentJobs, applyTaskResultToJob);
 
         // NOTE: ignore task failures for unqueued jobs
-        this.queue = _.reject(this.queue, _.partial(applyTaskResultToJob, _, {
+        _.forEach(this.queue, _.partial(applyTaskResultToJob, _, {
             ignoreFailure: true
         }));
 
         yield this.channel.ack(msg);
 
-        this.dispatchJobs();
-
-        if (this.closing) {
-            if (_.size(this.currentJobs) === 0 && _.size(this.queue) === 0) {
-                this.reportCloseComplete();
-            }
-        }
+        this.maintainJobs();
     }
 }
 
