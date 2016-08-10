@@ -24,26 +24,84 @@ class RemoteWorkQueueClient {
         this.concurrentJobs = concurrentJobs;
         this.defaultPriority = defaultPriority;
 
+        this.active = false;
+        this.connection = null;
         this.channel = null;
         this.queue = [];
         this.currentJobs = [];
+        this.closing = false;
+        this.reportCloseComplete = _.noop;
     }
 
     *
     initialize() {
-        if (!this.channel) {
-            let connection = yield amqp.connect(this.connectionOptions.connect);
-            this.channel = yield connection.createChannel();
+        if (this.active) {
+            return;
+        }
 
-            yield this.channel.assertQueue(this.connectionOptions.commandQueue);
+        this.connection = yield amqp.connect(this.connectionOptions.connect);
+        this.channel = yield this.connection.createChannel();
 
-            yield this.channel.assertExchange(this.connectionOptions.resultExchange, 'fanout');
-            let responseQueue = yield this.channel.assertQueue('', {
-                exclusive: true
-            });
-            yield this.channel.bindQueue(responseQueue.queue, this.connectionOptions.resultExchange, '');
+        yield this.channel.assertQueue(this.connectionOptions.commandQueue);
 
-            yield this.channel.consume(responseQueue.queue, this.processResponse.bind(this));
+        yield this.channel.assertExchange(this.connectionOptions.resultExchange, 'fanout');
+        let responseQueue = yield this.channel.assertQueue('', {
+            exclusive: true
+        });
+        yield this.channel.bindQueue(responseQueue.queue, this.connectionOptions.resultExchange, '');
+
+        yield this.channel.consume(responseQueue.queue, this.processResponse.bind(this));
+
+        this.active = true;
+        this.closing = false;
+        this.reportCloseComplete = _.noop;
+    }
+
+    *
+    close(immediate = false) {
+        function terminateJob(job) {
+            if (job.runtimeTimeout) {
+                clearTimeout(job.runtimeTimeout);
+                job.runtimeTimeout = null;
+            }
+
+            if (job.waitTimeout) {
+                clearTimeout(job.waitTimeout);
+                job.waitTimeout = null;
+            }
+
+            job.reportFailure(new Error('remote work queue is shutting down'));
+        }
+
+        if (!this.active) {
+            return;
+        }
+
+        if (immediate) {
+            this.active = false;
+
+            _.forEach(this.queue, terminateJob);
+            this.queue = [];
+
+            _.forEach(this.currentJobs, terminateJob);
+            this.currentJobs = [];
+
+            yield this.channel.close();
+            yield this.connection.close();
+        }
+        else {
+            this.closing = true;
+
+            yield new Promise(_.bind(function(resolve) {
+                this.reportCloseComplete = resolve;
+            }, this));
+
+            yield this.channel.close();
+            yield this.connection.close();
+
+            this.active = false;
+            this.closing = false;
+            this.reportCloseComplete = _.noop;
         }
     }
 
@@ -54,6 +112,16 @@ class RemoteWorkQueueClient {
         unique = false
     } = {}) {
         return new Promise(_.bind(function(resolve, reject) {
+            if (!this.active) {
+                reject(new Error('remote work queue is inactive'));
+                return;
+            }
+
+            if (this.closing) {
+                reject(new Error('remote work queue is shutting down'));
+                return;
+            }
+
             let newJob = {
                 priority,
                 requested: moment().valueOf(),
@@ -125,6 +193,11 @@ class RemoteWorkQueueClient {
 
     *
     processResponse(msg) {
+        if (!this.active) {
+            yield this.channel.ack(msg);
+            return;
+        }
+
         let response = helpers.convertBufferToJSON(msg.contents);
 
         function applyTaskResultToJob(job, {
@@ -190,6 +263,12 @@ class RemoteWorkQueueClient {
         yield this.channel.ack(msg);
 
         this.dispatchJobs();
+
+        if (this.closing) {
+            if (_.size(this.currentJobs) === 0 && _.size(this.queue) === 0) {
+                this.reportCloseComplete();
+            }
+        }
     }
 }
 
