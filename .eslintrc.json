@@ -1,0 +1,64 @@
+{
+    "env": {
+        "es6": true,
+        "node": true
+    },
+    "extends": [
+        "eslint:recommended",
+        "plugin:lodash/recommended"
+    ],
+    "parserOptions": {
+        "ecmaVersion": 6
+    },
+    "plugins": [
+        "lodash"
+    ],
+    "rules": {
+        "array-callback-return": "error",
+        "arrow-body-style": "error",
+        "arrow-parens": [
+            "error",
+            "as-needed"
+        ],
+        "arrow-spacing": "error",
+        "block-scoped-var": "error",
+        "brace-style": [
+            "error",
+            "stroustrup"
+        ],
+        "callback-return": "error",
+        "comma-style": "error",
+        "curly": "error",
+        "dot-location": "error",
+        "dot-notation": "error",
+        "eqeqeq": "error",
+        "global-require": "error",
+        "handle-callback-err": "error",
+        "key-spacing": "error",
+        "no-confusing-arrow": [
+            "error",
+            {
+                "allowParens": true
+            }
+        ],
+        "no-mixed-requires": "error",
+        "no-new-require": "error",
+        "no-path-concat": "error",
+        "no-process-exit": "error",
+        "no-shadow": "error",
+        "no-throw-literal": "error",
+        "no-unneeded-ternary": "error",
+        "no-use-before-define": "error",
+        "object-shorthand": "error",
+        "operator-assignment": "error",
+        "prefer-spread": "error",
+        "prefer-template": "error",
+        "require-yield": "error",
+        "quotes": [
+            "error",
+            "single"
+        ],
+        "template-curly-spacing": "error",
+        "yoda": "error"
+    }
+}

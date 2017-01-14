@@ -3,273 +3,230 @@
 const _ = require('lodash');
 const amqp = require('amqplib');
 const asyncClass = require('async-class');
-const crypto = require('crypto');
+const debug = require('debug')('remote-work-queue:client');
 const moment = require('moment');
+const uuid = require('uuid');
 
 const helpers = require('./helpers');
 
+const DEFAULT_PRIORITY = 15;
+const MAX_PRIORITY = 255;
+
 class RemoteWorkQueueClient {
     constructor({
-        connect = 'amqp://localhost',
-        commandQueue = 'remote-work-commands',
-        resultExchange = 'remote-work-results',
-        concurrentJobs = 1,
-        defaultPriority = 10
+        amqpURL = 'amqp://localhost',
+        defaultPriority = DEFAULT_PRIORITY,
+        jobQueue = 'remote-work-jobs'
     } = {}) {
         this.connectionOptions = {
-            connect,
-            commandQueue,
-            resultExchange
+            amqpURL,
+            jobQueue
         };
-        this.concurrentJobs = concurrentJobs;
         this.defaultPriority = defaultPriority;
 
-        this.active = false;
         this.connection = null;
         this.channel = null;
-        this.queue = [];
-        this.currentJobs = [];
+
+        this.jobs = new Map();
+
+        this.active = false;
+        this.initializing = false;
         this.closing = false;
-        this.reportCloseComplete = _.noop;
     }
 
-    *
-    initialize() {
-        if (this.active) {
+    * initialize() {
+        if (this.active || this.initializing || this.closing) {
             return;
         }
+
+        this.initializing = true;
+
+        this.jobs.clear();
 
         this.connection = yield amqp.connect(this.connectionOptions.connect);
         this.channel = yield this.connection.createChannel();
 
-        yield this.channel.assertQueue(this.connectionOptions.commandQueue);
-
-        yield this.channel.assertExchange(this.connectionOptions.resultExchange, 'fanout');
-        let responseQueue = yield this.channel.assertQueue('', {
-            exclusive: true
+        yield this.channel.assertQueue(this.connectionOptions.jobQueue, {
+            maxPriority: MAX_PRIORITY
         });
-        yield this.channel.bindQueue(responseQueue.queue, this.connectionOptions.resultExchange, '');
 
-        yield this.channel.consume(responseQueue.queue, this.processResponse.bind(this));
+        let jobResultQueue = yield this.channel.assertQueue('', {
+            exclusive: true,
+            autoDelete: true
+        });
+        this.jobResultQueue = jobResultQueue.queue;
 
+        yield this.channel.prefetch(1);
+        yield this.channel.consume(this.jobResultQueue, _.bind(this.receiveTaskResult, this));
+
+        this.initializing = false;
         this.active = true;
-        this.closing = false;
-        this.reportCloseComplete = _.noop;
     }
 
-    *
-    close(immediate = false) {
-        function terminateJob(job) {
-            job.failed = true;
-            job.failure = new Error('remote work queue is shutting down');
-        }
-
-        if (!this.active || this.closing) {
+    * shutdown(immediate = false) {
+        if (!this.active || this.initializing || this.closing) {
             return;
         }
+
+        this.closing = true;
 
         if (immediate) {
-            this.active = false;
+            // reject all active jobs
+            for (let job of this.jobs.values()) {
+                job.reject(new Error('client is shutting down'))
+            }
 
-            _.forEach(this.queue, terminateJob);
-            _.forEach(this.currentJobs, terminateJob);
-
-            this.maintainJobs();
-
-            yield this.channel.close();
-            yield this.connection.close();
+            yield this.finishShutdown();
         }
         else {
-            this.closing = true;
+            // all active jobs will be completed regularly before shutdown finishes
 
-            yield new Promise(_.bind(function(resolve) {
-                this.reportCloseComplete = resolve;
+            if (this.jobs.size === 0) {
+                // no jobs actually remaining, just shut down
 
-                this.maintainJobs();
-            }, this));
-
-            yield this.channel.close();
-            yield this.connection.close();
-
-            this.active = false;
-            this.closing = false;
-            this.reportCloseComplete = _.noop;
+                yield this.finishShutdown();
+            }
         }
     }
 
-    queueJob(tasks, {
-        maxRuntime = null,
-        maxWait = null,
+    * finishShutdown() {
+        // clear lists
+        this.jobs.clear();
+
+        // close the channel and connection
+        yield this.channel.close();
+        yield this.connection.close();
+
+        this.closing = false;
+        this.active = false;
+    }
+
+    * queueJob(tasks, {
         priority = this.defaultPriority,
-        unique = false
+        unique = false,
+        retries = 0,
+        timestamp = Date.now(),
+        id,
+        type,
+        origin,
+        waitForJobCompletion = true
     } = {}) {
-        return new Promise(_.bind(function(resolve, reject) {
-            if (!this.active) {
-                reject(new Error('remote work queue is inactive'));
-                return;
-            }
+        priority = _.clamp(_.toInteger(priority), 0, 255);
+        unique = !!unique;
+        retries = _.clamp(_.toInteger(retries));
+        timestamp = moment(timestamp);
 
-            if (this.closing) {
-                reject(new Error('remote work queue is shutting down'));
-                return;
-            }
-
-            let jobTasks = unique ? _.map(tasks, task => _.defaults({
-                _remoteWorkQueueId: crypto.randomBytes(8).toString()
-            }, task)) : _(tasks).map(_.clone).uniqWith(_.isEqual).value();
-
-            let newJob = {
-                priority,
-                requested: moment().valueOf(),
-                tasks: jobTasks,
-                completed: _.fill(new Array(_.size(jobTasks)), false),
-                results: _.fill(new Array(_.size(jobTasks)), null),
-                failed: false,
-                failure: null,
-                maxRuntime,
-                maxWait,
-                runtimeTimeout: null,
-                waitTimeout: null,
-                reportSuccess: resolve,
-                reportFailure: reject
-            };
-
-            let queueIndex = _.findLastIndex(this.queue, job => (job.priority >= newJob.priority)) + 1;
-            this.queue.splice(queueIndex, 0, newJob);
-
-            if (newJob.maxWait) {
-                newJob.waitTimeout = setTimeout(_.bind(function(job) {
-                    if (!job.failed) {
-                        job.failed = true;
-                        job.failure = new Error('task waited too long');
-                    }
-
-                    this.maintainJobs();
-                }, this, newJob), newJob.maxWait);
-            }
-
-            this.dispatchJobs();
-        }, this));
-    }
-
-    *
-    dispatchJobs() {
-        let jobsFailed = false;
-
-        while (_.size(this.currentJobs) < this.concurrentJobs && _.size(this.queue) > 0) {
-            let nextJob = this.queue.shift();
-            this.currentJobs.push(nextJob);
-
-            try {
-                for (let task of nextJob.tasks) {
-                    this.channel.sendToQueue(this.connectionOptions.commandQueue, helpers.convertJSONToBuffer(task), {
-                        persistent: true
-                    });
-                }
-            }
-            catch (err) {
-                jobsFailed = true;
-
-                nextJob.failed = true;
-                nextJob.failure = err;
-            }
-
-            if (nextJob.maxRuntime) {
-                nextJob.runtimeTimeout = setTimeout(_.bind(function(job) {
-                    if (!job.failed) {
-                        job.failed = true;
-                        job.failure = new Error('task timed out');
-                    }
-
-                    this.maintainJobs();
-                }, this, nextJob), nextJob.maxRuntime);
-            }
+        if (!this.active) {
+            throw new Error('cannot queue jobs when uninitialized');
         }
-
-        if (jobsFailed) {
-            this.maintainJobs();
-        }
-    }
-
-    maintainJobs() {
-        function checkIfJobComplete(job) {
-            if (job.failed || !_.includes(job.completed, false)) {
-                if (job.runtimeTimeout) {
-                    clearTimeout(job.runtimeTimeout);
-                    job.runtimeTimeout = null;
-                }
-
-                if (job.waitTimeout) {
-                    clearTimeout(job.waitTimeout);
-                    job.waitTimeout = null;
-                }
-
-                if (!_.includes(job.completed, false)) {
-                    job.reportSuccess(job.results);
-                }
-
-                if (job.failed) {
-                    job.reportFailure(job.failure);
-                }
-
-                return true;
-            }
-
-            return false;
-        }
-
-        this.currentJobs = _.reject(this.currentJobs, checkIfJobComplete);
-        this.queue = _.reject(this.queue, checkIfJobComplete);
-
-        this.dispatchJobs();
 
         if (this.closing) {
-            if (_.size(this.currentJobs) === 0 && _.size(this.queue) === 0) {
-                this.reportCloseComplete();
-            }
+            throw new Error('cannot queue new jobs while closing');
+        }
+
+        if (!_.every(tasks, task => _.isString(task.type))) {
+            throw new Error('one or more tasks are in invalid format');
+        }
+
+        if (waitForJobCompletion) {
+            // create and associate job with an ID and promise for later usage
+            let jobID = uuid.v4();
+            let job = {};
+            let promise = new Promise(function(resolve, reject) {
+                job.resolve = resolve;
+                job.reject = reject;
+            });
+            this.jobs.set(jobID, job);
+
+            // send job to queue
+            yield this.channel.sendToQueue(this.connectionOptions.jobQueue, helpers.convertJSONToBuffer({
+                tasks,
+                unique,
+                retries
+            }), {
+                priority,
+                persistent: true,
+                correlationId: jobID,
+                replyTo: this.jobReturnQueue,
+                messageId: id,
+                timestamp: timestamp.unix(),
+                type,
+                appId: origin
+            });
+
+            // wait for job finish and return any results
+            let result = yield promise;
+            return result;
+        }
+        else {
+            // just send the job without waiting for any results
+            yield this.channel.sendToQueue(this.connectionOptions.jobQueue, helpers.convertJSONToBuffer({
+                tasks,
+                unique,
+                retries
+            }), {
+                priority,
+                persistent: true,
+                messageId: id,
+                timestamp: timestamp.unix(),
+                type,
+                appId: origin
+            });
         }
     }
 
-    *
-    processResponse(msg) {
+    * receiveJobResult(msg) {
         if (!this.active) {
-            this.channel.ack(msg);
             return;
         }
 
-        let response = helpers.convertBufferToJSON(msg.content);
+        let result = helpers.convertBufferToJSON(msg.content);
 
-        function applyTaskResultToJob(job, {
-            ignoreFailure = false
-        } = {}) {
-            if (response.start > job.requested) {
-                let taskIndex = _.findIndex(job.tasks, task => _.isEqual(task, response.task));
+        yield this.processJobResult(_.assign({}, result, {
+            priority: msg.properties.priority,
+            returnID: msg.properties.correlationId,
+            jobID: msg.properties.messageId,
+            timestamp: msg.properties.timestamp,
+            jobType: msg.properties.type,
+            jobOrigin: msg.properties.appId,
+            originalMessage: msg
+        }));
+    }
 
-                if (taskIndex !== -1) {
-                    if (response.success) {
-                        job.completed[taskIndex] = true;
-                        job.results[taskIndex] = response.result;
-                    }
-                    else if (!ignoreFailure) {
-                        if (!job.failed) {
-                            job.failed = true;
-                            job.failure = new Error(response.error);
-                        }
-                    }
-                }
-            }
+    * processJobResult({
+        success = false,
+        results = [],
+        error = new Error(),
+        returnID,
+        jobID,
+        jobType,
+        jobOrigin,
+        originalMessage
+    } = {}) {
+        if (jobID || jobType || jobOrigin) {
+            debug(`received results for ${helpers.describeJob(jobID, jobType, jobOrigin)}`);
         }
 
-        _.forEach(this.currentJobs, applyTaskResultToJob);
+        if (this.jobs.has(returnID)) {
+            let job = this.jobs.get(returnID);
 
-        // NOTE: ignore task failures for unqueued jobs
-        _.forEach(this.queue, _.partial(applyTaskResultToJob, _, {
-            ignoreFailure: true
-        }));
+            if (success) {
+                job.resolve(results);
+            }
+            else {
+                job.reject(error);
+            }
 
-        this.channel.ack(msg);
+            this.jobs.delete(returnID);
+        }
 
-        this.maintainJobs();
+        if (originalMessage && this.active) {
+            yield this.channel.ack(originalMessage);
+        }
+
+        if (this.closing && this.jobs.size === 0) {
+            yield this.finishShutdown();
+        }
     }
 }
 
